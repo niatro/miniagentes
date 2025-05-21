@@ -90,8 +90,14 @@ uv run sfa_bash_editor_agent_anthropic_v2.py --prompt "Create a new file called 
 # Replace text in a file
 uv run sfa_bash_editor_agent_anthropic_v2.py --prompt "Create a new file called hello.txt with 'Hello World!' in it. Then update hello.txt to say 'Hello AI Coding World'"
 
+# Insert a line in a file
+uv run sfa_bash_editor_agent_anthropic_v2.py --prompt "Create a new file called hello2.txt with 'Hello AI Coding World!' in it. Then add a new line 'How are you?' after 'Hello AI World!' in hello.txt"
+
 # Execute a bash command
 uv run sfa_bash_editor_agent_anthropic_v2.py --prompt "List all Python files in the current directory sorted by size"
+
+# Complete a multi-step task
+uv run sfa_bash_editor_agent_anthropic_v2.py --prompt "List all Python files in the current directory sorted by size, then output to a markdown file called python_files_sorted_by_size.md"
 ```
 
 ### Polars CSV Agent (OpenAI)
@@ -124,6 +130,20 @@ uv run sfa_scrapper_agent_openai_v2.py \
     --prompt "What are the names and descriptions of each lesson?" \
     --output-file-path paic-lessons.md \
     -c 10
+```
+
+### Excel Agent (OpenAI)
+> (sfa_excel_openai.py)
+
+An AI-powered assistant designed to explore, understand, and process data within Excel files (.xlsx, .xls). It leverages OpenAI's function calling capabilities to interact with Excel data by listing sheets, detecting data blocks, describing their structure, sampling rows, and executing queries using Pandas `DataFrame.query()` expressions. This agent is particularly useful for analyzing potentially unstructured Excel files where data might not be in a clean tabular format.
+
+Example usage:
+```bash
+# Analyze an Excel file and get a description of its content
+uv run sfa_excel_openai.py -d "your_excel_file.xlsx" -p "Explicame de que trata la planilla"
+
+# Perform a specific query on a sheet after exploration (example assumes prior exploration by the agent)
+uv run sfa_excel_openai.py -d "your_excel_file.xlsx" -p "En la hoja 'Ventas', calcula el total de la columna 'Ingresos' para el 'Producto A'" -c 15
 ```
 
 ## Features
