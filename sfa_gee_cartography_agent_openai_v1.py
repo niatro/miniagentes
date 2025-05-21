@@ -132,7 +132,7 @@ class GenerateRgbCompositeArgs(BaseModel):
 class GetAndSaveThumbnailArgs(BaseModel):
     reasoning: str = Field(..., description="Razón para obtener y guardar esta miniatura.")
     image_cache_id: str = Field(..., description="ID de la imagen procesada (NDBI, RGB) en el caché.")
-    vis_params: VisParamsBase = Field(..., description="Parámetros de visualización (min, max, palette, bands). Ejemplo NDBI: {\"min\": -0.5, \"max\": 0.5, \"palette\": [\"blue\", \"white\", \"brown\"]}. Ejemplo RGB: {\"min\": 0, \"max\": 3000, \"bands\": [\"B4\", \"B3\", \"B2\"], \"gamma\": 1.4}.")
+    vis_params: VisParamsBase = Field(..., description="Parámetros de visualización (min, max, palette, bands). Ejemplo NDBI: {\"min\": -0.5, \"max\": 0.5, \"palette\": [\"blue\", \"white\", \"brown\"], \"bands\": [\"nd_index\"]}. Ejemplo RGB: {\"min\": 0, \"max\": 3000, \"bands\": [\"B4\", \"B3\", \"B2\"], \"gamma\": 1.4}.")
     dimensions: str = Field(default="768x768", description="Dimensiones de la miniatura (ancho x alto en píxeles).")
     local_filename_prefix: str = Field(default="thumbnail", description="Prefijo para el nombre del archivo local de la miniatura (se añadirá un UUID y .png).")
 
@@ -143,7 +143,7 @@ class ExportImageToDriveArgs(BaseModel):
     drive_folder: str = Field(default=DEFAULT_DRIVE_FOLDER, description="Nombre de la carpeta en Google Drive donde se guardará la imagen.")
     scale: int = Field(default=30, description="Resolución de la exportación en metros por píxel.")
     crs: Optional[str] = Field(default=None, description="Sistema de Coordenadas de Referencia (ej. 'EPSG:4326'). Si es None, usa la proyección de la imagen.")
-    vis_params_for_export: Optional[VisParamsBase] = Field(default=None, description="Parámetros de visualización para aplicar a la imagen antes de exportar (ej. para exportar una imagen RGB estilizada). Si es None, se exportan los datos crudos (ej. para un índice).")
+    vis_params_for_export: Optional[VisParamsBase] = Field(default=None, description="Parámetros de visualización para aplicar a la imagen antes de exportar (ej. para exportar una imagen RGB estilizada o un índice coloreado). Si es None, se exportan los datos crudos (ej. para un índice). Ejemplo para NDBI coloreado: {\"min\": -0.5, \"max\": 0.5, \"palette\": [\"blue\", \"white\", \"brown\"], \"bands\": [\"nd_index\"]}")
 
 class CompleteTaskArgs(BaseModel):
     reasoning: str = Field(..., description="Razón por la cual la tarea se considera completada.")
@@ -219,8 +219,17 @@ def get_image_collection(reasoning: str, collection_name: str, start_date: str, 
             elif "LANDSAT" in collection_name: # Older Landsat or other collections
                 cloud_filter_prop = 'CLOUD_COVER'
             collection = collection.filter(ee.Filter.lte(cloud_filter_prop, cloud_cover_max_percent))
+        
+        # Verificar el tamaño de la colección
+        num_images = collection.size().getInfo()
+        if num_images == 0:
+            return (f"Error: No se encontraron imágenes en la colección '{collection_name}' para los filtros aplicados "
+                    f"(AOI: {aoi_id}, Fechas: {start_date}-{end_date}, Nubes <= {cloud_cover_max_percent}%). "
+                    f"No se puede continuar. Considera ampliar el rango de fechas o el AOI, o aumentar el umbral de nubes.")
+
         GEE_ASSETS_CACHE[collection_cache_id] = collection
-        return f"ImageCollection '{collection_name}' filtrada (AOI: {aoi_id}, Fechas: {start_date}-{end_date}, Nubes <= {cloud_cover_max_percent}%) y guardada como '{collection_cache_id}'."
+        return (f"ImageCollection '{collection_name}' filtrada ({num_images} imágenes encontradas, AOI: {aoi_id}, "
+                f"Fechas: {start_date}-{end_date}, Nubes <= {cloud_cover_max_percent}%) y guardada como '{collection_cache_id}'.")
     except Exception as e: return f"Error al obtener ImageCollection '{collection_name}': {str(e)}"
 
 def calculate_nd_index(reasoning: str, input_collection_cache_id: str, band1_name: str, band2_name: str, output_image_cache_id: str) -> str:
@@ -280,6 +289,12 @@ def get_and_save_thumbnail(reasoning: str, image_cache_id: str, vis_params: Unio
     try:
         if not os.path.exists(THUMBNAIL_DIR): os.makedirs(THUMBNAIL_DIR)
         vis_params_dict = vis_params_model.model_dump(exclude_none=True)
+        
+        # Asegurarse de que 'bands' esté presente si es un índice y se espera una paleta
+        # La imagen de índice se guarda con una sola banda llamada 'nd_index'
+        if 'palette' in vis_params_dict and 'bands' not in vis_params_dict and image_to_thumb.bandNames().getInfo() == ['nd_index']:
+            vis_params_dict['bands'] = ['nd_index']
+        
         thumb_params = {**vis_params_dict, 'dimensions': dimensions, 'format': 'png'}
         thumb_url = image_to_thumb.getThumbURL(thumb_params)
         response = requests.get(thumb_url); response.raise_for_status()
@@ -308,13 +323,26 @@ def export_image_to_drive(reasoning: str, image_cache_id: str, description: str,
         except Exception as e_geom: return f"Error: No se pudo obtener AOI para exportar '{image_cache_id}': {e_geom}."
     try:
         image_to_export = image_to_export_orig
+        vis_params_export_dict = {}
         if vis_params_for_export:
-            vis_model = VisParamsBase.model_validate(vis_params_for_export) if isinstance(vis_params_for_export, dict) else vis_params_for_export
-            if vis_model: image_to_export = image_to_export_orig.visualize(**vis_model.model_dump(exclude_none=True))
+            vis_model: Optional[VisParamsBase] = None
+            if isinstance(vis_params_for_export, dict):
+                try: vis_model = VisParamsBase.model_validate(vis_params_for_export)
+                except ValidationError as ve: return f"Error al validar vis_params_for_export: {ve}"
+            elif isinstance(vis_params_for_export, VisParamsBase):
+                vis_model = vis_params_for_export
+            
+            if vis_model:
+                vis_params_export_dict = vis_model.model_dump(exclude_none=True)
+                # Asegurar 'bands' para índices con paleta
+                if 'palette' in vis_params_export_dict and 'bands' not in vis_params_export_dict and image_to_export_orig.bandNames().getInfo() == ['nd_index']:
+                    vis_params_export_dict['bands'] = ['nd_index']
+                image_to_export = image_to_export_orig.visualize(**vis_params_export_dict)
+
         export_params: Dict[str, Any] = {'image': image_to_export, 'description': description.replace(" ", "_"), 'folder': drive_folder, 'scale': scale, 'region': aoi_for_export.bounds().getInfo()['coordinates'], 'fileFormat': 'GeoTIFF', 'maxPixels': 1e13}
         if crs: export_params['crs'] = crs
         task = ee.batch.Export.image.toDrive(**export_params); task.start()
-        return f"Exportación a Drive iniciada: '{description}', Tarea ID: {task.id}."
+        return f"Exportación a Drive iniciada: '{description}', Tarea ID: {task.id}. VisParams aplicados: {vis_params_export_dict if vis_params_export_dict else 'Ninguno (datos crudos)'}"
     except Exception as e: return f"Error al exportar a Drive '{image_cache_id}': {str(e)}"
 
 def complete_task(reasoning: str, final_message_to_user: str) -> str:
@@ -342,12 +370,15 @@ AGENT_PROMPT = """<purpose>
 <instructions>
     <instruction>Comienza siempre llamando a `InitializeGeeArgs`.</instruction>
     <instruction>Si `InitializeGeeArgs` falla, informa al usuario el error exacto y cómo solucionarlo (ej. `earthengine authenticate` o verificar proyecto '{GEE_PROJECT_ID}'). NO llames a otras herramientas GEE. Tu siguiente respuesta debe ser solo para el usuario. El agente finalizará.</instruction>
-    <instruction>Para definir el AOI, usa `DefineAoiFromGeoJSONArgs`. Genera un GeoJSON válido. Guarda con `aoi_id` (ej. 'current_aoi').</instruction>
+    <instruction>Para definir el AOI, usa `DefineAoiFromGeoJSONArgs`. Genera un GeoJSON válido. Si el usuario especifica una ciudad o una región amplia, el GeoJSON debe cubrir un área representativa de esa entidad geográfica (por ejemplo, un polígono de al menos 5km x 5km o un radio de varios kilómetros si es un punto bufferizado) para asegurar un análisis visual útil y evitar áreas demasiado pequeñas. No definas un polígono de solo unos cientos de metros si se nombra una ciudad. Guarda con `aoi_id` (ej. 'current_aoi').</instruction>
     <instruction>Usa `GetImageCollectionArgs` para obtener imágenes (ej. Sentinel-2: 'COPERNICUS/S2_SR_HARMONIZED'). Filtra por fechas, `aoi_id`, y nubes. Guarda con `collection_cache_id`.</instruction>
-    <instruction>Para NDBI (Sentinel-2: B11, B8; Landsat 8: SR_B6, SR_B5), usa `CalculateNdIndexArgs`. Guarda con `output_image_cache_id`.</instruction>
+    <instruction>Para NDBI (Sentinel-2: B11, B8; Landsat 8: SR_B6, SR_B5), usa `CalculateNdIndexArgs`. Guarda con `output_image_cache_id`. La imagen resultante tendrá una banda llamada 'nd_index'.</instruction>
     <instruction>Para RGB (Sentinel-2: B4,B3,B2; Landsat 8: SR_B4,SR_B3,SR_B2), usa `GenerateRgbCompositeArgs`. Proporciona `vis_params_rgb`. Guarda con `output_image_cache_id`.</instruction>
-    <instruction>Para miniaturas, usa `GetAndSaveThumbnailArgs`. Especifica `image_cache_id` y `vis_params` (NDBI: `{"min": -0.3, "max": 0.5, "palette": ["0000FF", "FFFFFF", "A52A2A"]}`; RGB: `{"min": 0.0, "max": 0.3, "bands": ["B4","B3","B2"]}`). Guarda en '{THUMBNAIL_DIR}'. El `local_filename_prefix` debe ser solo un nombre de archivo, sin ruta de directorio.</instruction>
-    <instruction>Para exportar a Drive, usa `ExportImageToDriveArgs`. `description` es nombre de archivo. `drive_folder` (def: '{DEFAULT_DRIVE_FOLDER}'). `scale` en metros. Para RGB visual, usa `vis_params_for_export`; para datos crudos de índice, omítelo.</instruction>
+    <instruction>Para miniaturas, usa `GetAndSaveThumbnailArgs`. Especifica `image_cache_id` y `vis_params`. Para índices de una sola banda (como NDVI o NDBI, que se guardan con el nombre de banda 'nd_index'), usa `vis_params` como `{"min": -0.3, "max": 0.5, "palette": ["0000FF", "FFFFFF", "A52A2A"], "bands": ["nd_index"]}`. Para RGB, usa algo como `{"min": 0.0, "max": 0.3, "bands": ["B4","B3","B2"]}` (asegúrate que las bandas RGB coincidan con las usadas en `GenerateRgbCompositeArgs`). Guarda en '{THUMBNAIL_DIR}'. El `local_filename_prefix` debe ser solo un nombre de archivo, sin ruta de directorio.</instruction>
+    <instruction>Para exportar a Drive, usa `ExportImageToDriveArgs`. `description` es nombre de archivo. `drive_folder` (def: '{DEFAULT_DRIVE_FOLDER}'). `scale` en metros (para Sentinel-2, usa 10 para la resolución nativa de bandas como NDVI o RGB; para Landsat, 30 es apropiado).
+        Si el objetivo es una imagen visual coloreada para el índice (similar a la miniatura), DEBES proporcionar `vis_params_for_export` con la paleta y banda adecuadas (ej. para NDVI: `{"min": -0.3, "max": 0.5, "palette": ["0000FF", "FFFFFF", "A52A2A"], "bands": ["nd_index"]}`).
+        Si explícitamente se piden datos crudos del índice (para análisis numérico, lo que resultará en una imagen en escala de grises por defecto), entonces omite `vis_params_for_export`.
+        Para exportar una imagen RGB visual, también usa `vis_params_for_export` (ej. `{"min": 0.0, "max": 0.3, "bands": ["B4","B3","B2"]}`).</instruction>
     <instruction>Proporciona razonamiento conciso para cada llamada. Usa IDs de caché para referenciar objetos.</instruction>
     <instruction>Una vez que todas las acciones solicitadas (ej. cálculo de índice, miniatura, exportación) se hayan completado exitosamente, llama a la herramienta `CompleteTaskArgs` para finalizar la interacción, proporcionando un `final_message_to_user` que resuma lo que se hizo y dónde encontrar los resultados.</instruction>
 </instructions>
@@ -429,22 +460,16 @@ def main():
                             if func_name == "ExportImageToDriveArgs" and 'drive_folder' not in parsed_args_dict:
                                 parsed_args_dict['drive_folder'] = args.drive_folder
                             
-                            # Para GenerateRgbCompositeArgs y GetAndSaveThumbnailArgs, los vis_params pueden venir como dict
-                            # y necesitan ser pasados como tal si la función los espera así para validación interna.
-                            # Las demás funciones esperan los args ya parseados por Pydantic.
+                            # Para GenerateRgbCompositeArgs, GetAndSaveThumbnailArgs y ExportImageToDriveArgs,
+                            # los vis_params pueden venir como dict y necesitan ser pasados como tal
+                            # si la función los espera así para validación interna de VisParamsBase.
                             if func_name in ["GenerateRgbCompositeArgs", "GetAndSaveThumbnailArgs", "ExportImageToDriveArgs"]:
-                                # No usamos pydantic_class.model_validate aquí para estos casos específicos
-                                # ya que la validación de VisParamsBase se hace dentro de la función.
-                                # Pasamos el diccionario directamente.
-                                # Sin embargo, para la estructura general, los demás campos sí deben validarse.
-                                # Esto es un poco mixto. La validación principal de los args de la herramienta
-                                # sí se hace con pydantic_class.model_validate(parsed_args_dict).
-                                # El problema es que vis_params_rgb (o vis_params) es un campo DENTRO de esos args.
-                                # Pydantic lo convierte a VisParamsBase, pero luego .model_dump() lo vuelve dict.
-                                # La solución es que la función herramienta maneje el dict o el objeto.
+                                # La validación principal de los args de la herramienta se hace con pydantic_class.model_validate.
+                                # El campo vis_params (o vis_params_rgb, vis_params_for_export) dentro de esos args
+                                # será validado como VisParamsBase por Pydantic.
+                                # La función herramienta recibirá el objeto Pydantic y lo usará.
                                 parsed_args_obj = pydantic_class.model_validate(parsed_args_dict)
                                 tool_result = function_to_call(**parsed_args_obj.model_dump())
-
                             else:
                                 parsed_args = pydantic_class.model_validate(parsed_args_dict)
                                 tool_result = function_to_call(**parsed_args.model_dump())
