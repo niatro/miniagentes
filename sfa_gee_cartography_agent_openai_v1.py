@@ -85,6 +85,16 @@ DEFAULT_DRIVE_FOLDER = "GEE_images"
 THUMBNAIL_DIR = "./map_previews"
 GEE_PROJECT_ID = "industrious-eye-384414" # ID del proyecto GEE/GCP
 
+# -------------------------------#
+#  PARÁMETROS POR DEFECTO RGB    #
+# -------------------------------#
+DEFAULT_VIS_PARAMS_RGB = {
+    "min": 0,          # Sentinel-2 SR usa DN 0-10000
+    "max": 3000,       # ≈ 0,30 de reflectancia
+    "gamma": 1.4,
+    "bands": ["B4", "B3", "B2"]
+}
+
 # ---------------------------------------------------
 # MODELOS Pydantic (definición de args de cada tool)
 # ---------------------------------------------------
@@ -126,7 +136,7 @@ class GenerateRgbCompositeArgs(BaseModel):
     red_band: str = Field(..., description="Nombre de la banda Roja (ej. 'B4' para Sentinel-2).")
     green_band: str = Field(..., description="Nombre de la banda Verde (ej. 'B3' para Sentinel-2).")
     blue_band: str = Field(..., description="Nombre de la banda Azul (ej. 'B2' para Sentinel-2).")
-    vis_params_rgb: Optional[VisParamsBase] = Field(default_factory=lambda: VisParamsBase(min=0.0, max=3000, gamma=1.4), description="Parámetros de visualización para RGB (min, max, gamma, etc.). Ejemplo: {\"min\": 0, \"max\": 3000, \"bands\": [\"B4\", \"B3\", \"B2\"]}. Las bandas se infieren de los parámetros red_band, green_band, blue_band.")
+    vis_params_rgb: Optional[VisParamsBase] = Field(default_factory=lambda: VisParamsBase(**DEFAULT_VIS_PARAMS_RGB), description="Parámetros de visualización para RGB (min, max, gamma, etc.). Ejemplo: {\"min\": 0, \"max\": 3000, \"bands\": [\"B4\", \"B3\", \"B2\"]}. Las bandas se infieren de los parámetros red_band, green_band, blue_band.")
     output_image_cache_id: str = Field(..., description="ID para guardar la imagen RGB resultante en el caché.")
 
 class GetAndSaveThumbnailArgs(BaseModel):
@@ -279,33 +289,61 @@ def get_and_save_thumbnail(reasoning: str, image_cache_id: str, vis_params: Unio
     if not initialized: return f"Error: GEE no inicializado. {error_detail if error_detail else 'Causa desconocida.'}"
     if image_cache_id not in GEE_ASSETS_CACHE or not isinstance(GEE_ASSETS_CACHE[image_cache_id], ee.Image):
         return f"Error: Imagen '{image_cache_id}' no encontrada o no es ee.Image."
-    image_to_thumb = GEE_ASSETS_CACHE[image_cache_id]
+    
+    image_to_thumb_orig = GEE_ASSETS_CACHE[image_cache_id]
+    
     vis_params_model: VisParamsBase
     if isinstance(vis_params, dict):
         try: vis_params_model = VisParamsBase.model_validate(vis_params)
         except ValidationError as ve: return f"Error al validar vis_params: {ve}."
     elif isinstance(vis_params, VisParamsBase): vis_params_model = vis_params
     else: return f"Error: Tipo de vis_params inesperado: {type(vis_params)}."
+    
     try:
         if not os.path.exists(THUMBNAIL_DIR): os.makedirs(THUMBNAIL_DIR)
-        vis_params_dict = vis_params_model.model_dump(exclude_none=True)
         
-        # Asegurarse de que 'bands' esté presente si es un índice y se espera una paleta
-        # La imagen de índice se guarda con una sola banda llamada 'nd_index'
-        if 'palette' in vis_params_dict and 'bands' not in vis_params_dict and image_to_thumb.bandNames().getInfo() == ['nd_index']:
-            vis_params_dict['bands'] = ['nd_index']
+        vis_params_dict = vis_params_model.model_dump(exclude_none=True) 
         
-        thumb_params = {**vis_params_dict, 'dimensions': dimensions, 'format': 'png'}
-        thumb_url = image_to_thumb.getThumbURL(thumb_params)
-        response = requests.get(thumb_url); response.raise_for_status()
+        image_for_url_generation = image_to_thumb_orig
+        params_for_thumb_url = {'dimensions': dimensions, 'format': 'png'}
 
-        # Clean the prefix to be just the base name, removing any directory parts
+        is_single_band_index_with_palette = (
+            'palette' in vis_params_dict and
+            image_to_thumb_orig.bandNames().getInfo() == ['nd_index'] and
+            vis_params_dict.get('bands') == ['nd_index']
+        )
+
+        if is_single_band_index_with_palette:
+            console.log(f"Applying .visualize() to '{image_cache_id}' before getThumbURL using palette for single band index.")
+            visualize_args = {
+                'bands': ['nd_index'],
+                'min': vis_params_dict.get('min'),
+                'max': vis_params_dict.get('max'),
+                'palette': vis_params_dict.get('palette')
+            }
+            visualize_args = {k: v for k, v in visualize_args.items() if v is not None}
+            
+            image_for_url_generation = image_to_thumb_orig.visualize(**visualize_args)
+        else:
+            current_thumb_params_to_pass = vis_params_dict.copy()
+            # GEE no permite gamma y palette juntos. Si gamma es None, exclude_none=True ya lo habrá quitado.
+            # Si gamma tiene un valor y hay palette, debemos quitar gamma.
+            if 'palette' in current_thumb_params_to_pass and 'gamma' in current_thumb_params_to_pass:
+                del current_thumb_params_to_pass['gamma']
+            params_for_thumb_url.update(current_thumb_params_to_pass)
+
+        thumb_url = image_for_url_generation.getThumbURL(params_for_thumb_url)
+        
+        response = requests.get(thumb_url)
+        response.raise_for_status()
+
         cleaned_prefix = os.path.basename(local_filename_prefix)
         filename = f"{cleaned_prefix.replace(' ', '_')}_{uuid.uuid4().hex[:8]}.png"
-        filepath = os.path.join(THUMBNAIL_DIR, filename) # Now THUMBNAIL_DIR is prepended to a clean name
+        filepath = os.path.join(THUMBNAIL_DIR, filename)
 
         with open(filepath, 'wb') as f: f.write(response.content)
-        return f"Miniatura guardada: {filepath}. VisParams: {thumb_params}"
+        
+        return f"Miniatura guardada: {filepath}. VisParams (efectivos para getThumbURL): {params_for_thumb_url}"
     except Exception as e:
         console.print(f"[bold red]Detalle error thumbnail: {e}[/bold red]")
         return f"Error al guardar miniatura para '{image_cache_id}': {str(e)}."
@@ -337,6 +375,12 @@ def export_image_to_drive(reasoning: str, image_cache_id: str, description: str,
                 # Asegurar 'bands' para índices con paleta
                 if 'palette' in vis_params_export_dict and 'bands' not in vis_params_export_dict and image_to_export_orig.bandNames().getInfo() == ['nd_index']:
                     vis_params_export_dict['bands'] = ['nd_index']
+                
+                # GEE no permite gamma y palette juntos. Si gamma es None, exclude_none=True ya lo habrá quitado.
+                # Si gamma tiene un valor y hay palette, debemos quitar gamma antes de .visualize().
+                if 'palette' in vis_params_export_dict and 'gamma' in vis_params_export_dict:
+                    del vis_params_export_dict['gamma']
+                
                 image_to_export = image_to_export_orig.visualize(**vis_params_export_dict)
 
         export_params: Dict[str, Any] = {'image': image_to_export, 'description': description.replace(" ", "_"), 'folder': drive_folder, 'scale': scale, 'region': aoi_for_export.bounds().getInfo()['coordinates'], 'fileFormat': 'GeoTIFF', 'maxPixels': 1e13}
@@ -370,15 +414,17 @@ AGENT_PROMPT = """<purpose>
 <instructions>
     <instruction>Comienza siempre llamando a `InitializeGeeArgs`.</instruction>
     <instruction>Si `InitializeGeeArgs` falla, informa al usuario el error exacto y cómo solucionarlo (ej. `earthengine authenticate` o verificar proyecto '{GEE_PROJECT_ID}'). NO llames a otras herramientas GEE. Tu siguiente respuesta debe ser solo para el usuario. El agente finalizará.</instruction>
-    <instruction>Para definir el AOI, usa `DefineAoiFromGeoJSONArgs`. Genera un GeoJSON válido. Si el usuario especifica una ciudad o una región amplia, el GeoJSON debe cubrir un área representativa de esa entidad geográfica (por ejemplo, un polígono de al menos 5km x 5km o un radio de varios kilómetros si es un punto bufferizado) para asegurar un análisis visual útil y evitar áreas demasiado pequeñas. No definas un polígono de solo unos cientos de metros si se nombra una ciudad. Guarda con `aoi_id` (ej. 'current_aoi').</instruction>
+    <instruction>Para definir el AOI, usa `DefineAoiFromGeoJSONArgs`. Genera un GeoJSON válido. Si el usuario especifica una ciudad o una región amplia, el GeoJSON debe cubrir un área representativa de esa entidad geográfica (por ejemplo, un polígono de al menos 5 km × 5 km o un radio de varios kilómetros si es un punto bufferizado) para asegurar un análisis visual útil y evitar áreas demasiado pequeñas. No definas un polígono de solo unos cientos de metros si se nombra una ciudad. Guarda con `aoi_id` (ej. 'current_aoi').</instruction>
     <instruction>Usa `GetImageCollectionArgs` para obtener imágenes (ej. Sentinel-2: 'COPERNICUS/S2_SR_HARMONIZED'). Filtra por fechas, `aoi_id`, y nubes. Guarda con `collection_cache_id`.</instruction>
     <instruction>Para NDBI (Sentinel-2: B11, B8; Landsat 8: SR_B6, SR_B5), usa `CalculateNdIndexArgs`. Guarda con `output_image_cache_id`. La imagen resultante tendrá una banda llamada 'nd_index'.</instruction>
     <instruction>Para RGB (Sentinel-2: B4,B3,B2; Landsat 8: SR_B4,SR_B3,SR_B2), usa `GenerateRgbCompositeArgs`. Proporciona `vis_params_rgb`. Guarda con `output_image_cache_id`.</instruction>
-    <instruction>Para miniaturas, usa `GetAndSaveThumbnailArgs`. Especifica `image_cache_id` y `vis_params`. Para índices de una sola banda (como NDVI o NDBI, que se guardan con el nombre de banda 'nd_index'), usa `vis_params` como `{"min": -0.3, "max": 0.5, "palette": ["0000FF", "FFFFFF", "A52A2A"], "bands": ["nd_index"]}`. Para RGB, usa algo como `{"min": 0.0, "max": 0.3, "bands": ["B4","B3","B2"]}` (asegúrate que las bandas RGB coincidan con las usadas en `GenerateRgbCompositeArgs`). Guarda en '{THUMBNAIL_DIR}'. El `local_filename_prefix` debe ser solo un nombre de archivo, sin ruta de directorio.</instruction>
-    <instruction>Para exportar a Drive, usa `ExportImageToDriveArgs`. `description` es nombre de archivo. `drive_folder` (def: '{DEFAULT_DRIVE_FOLDER}'). `scale` en metros (para Sentinel-2, usa 10 para la resolución nativa de bandas como NDVI o RGB; para Landsat, 30 es apropiado).
-        Si el objetivo es una imagen visual coloreada para el índice (similar a la miniatura), DEBES proporcionar `vis_params_for_export` con la paleta y banda adecuadas (ej. para NDVI: `{"min": -0.3, "max": 0.5, "palette": ["0000FF", "FFFFFF", "A52A2A"], "bands": ["nd_index"]}`).
-        Si explícitamente se piden datos crudos del índice (para análisis numérico, lo que resultará en una imagen en escala de grises por defecto), entonces omite `vis_params_for_export`.
-        Para exportar una imagen RGB visual, también usa `vis_params_for_export` (ej. `{"min": 0.0, "max": 0.3, "bands": ["B4","B3","B2"]}`).</instruction>
+    <instruction>Para miniaturas, usa `GetAndSaveThumbnailArgs`. Especifica `image_cache_id` y `vis_params`. Para índices de una sola banda (como NDVI o NDBI, que se guardan con el nombre de banda 'nd_index'), usa `vis_params` como `{"min": -0.3, "max": 0.5, "palette": ["0000FF", "FFFFFF", "A52A2A"], "bands": ["nd_index"]}`.  
+    Si se usa una paleta, `gamma` debe ser `null` o no incluirse.  
+    Para RGB, usa algo como `{"min": 0, "max": 3000, "gamma": 1.4, "bands": ["B4","B3","B2"]}` (asegúrate de que las bandas RGB coincidan con las usadas en `GenerateRgbCompositeArgs`). Guarda en '{THUMBNAIL_DIR}'. El `local_filename_prefix` debe ser solo un nombre de archivo, sin ruta de directorio.</instruction>
+    <instruction>Para exportar a Drive, usa `ExportImageToDriveArgs`. `description` es el nombre de archivo. `drive_folder` (defecto: '{DEFAULT_DRIVE_FOLDER}'). `scale` en metros (para Sentinel-2 usa 10 m; para Landsat usa 30 m).
+        Si el objetivo es una imagen visual coloreada para el índice (similar a la miniatura), DEBES proporcionar `vis_params_for_export` con la paleta y banda adecuadas (ej. NDVI: `{"min": -0.3, "max": 0.5, "palette": ["0000FF", "FFFFFF", "A52A2A"], "bands": ["nd_index"]}`). Si se usa una paleta, `gamma` debe ser `null` o no incluirse.
+        Si explícitamente se piden datos crudos del índice (para análisis numérico, lo que resultará en una imagen en escala de grises por defecto), omite `vis_params_for_export`.
+        Para exportar una imagen RGB visual, usa también `vis_params_for_export` (ej. `{"min": 0, "max": 3000, "gamma": 1.4, "bands": ["B4","B3","B2"]}`).</instruction>
     <instruction>Proporciona razonamiento conciso para cada llamada. Usa IDs de caché para referenciar objetos.</instruction>
     <instruction>Una vez que todas las acciones solicitadas (ej. cálculo de índice, miniatura, exportación) se hayan completado exitosamente, llama a la herramienta `CompleteTaskArgs` para finalizar la interacción, proporcionando un `final_message_to_user` que resuma lo que se hizo y dónde encontrar los resultados.</instruction>
 </instructions>
