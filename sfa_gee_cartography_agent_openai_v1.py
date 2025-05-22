@@ -230,7 +230,6 @@ def get_image_collection(reasoning: str, collection_name: str, start_date: str, 
                 cloud_filter_prop = 'CLOUD_COVER'
             collection = collection.filter(ee.Filter.lte(cloud_filter_prop, cloud_cover_max_percent))
         
-        # Verificar el tamaño de la colección
         num_images = collection.size().getInfo()
         if num_images == 0:
             return (f"Error: No se encontraron imágenes en la colección '{collection_name}' para los filtros aplicados "
@@ -276,11 +275,15 @@ def generate_rgb_composite(reasoning: str, input_collection_cache_id: str, red_b
                 return f"Error al validar vis_params_rgb para RGB: {ve}."
         elif isinstance(vis_params_rgb, VisParamsBase):
             vis_params_rgb_model = vis_params_rgb
-        elif vis_params_rgb is not None: # Not a dict, not VisParamsBase, but not None
+        elif vis_params_rgb is not None:
              return f"Error: Tipo de vis_params_rgb inesperado: {type(vis_params_rgb)}."
-
+        
         vis_params_rgb_dict = vis_params_rgb_model.model_dump(exclude_none=True) if vis_params_rgb_model else {}
-        return f"RGB generado (R:{red_band},G:{green_band},B:{blue_band}) de '{input_collection_cache_id}', guardado como '{output_image_cache_id}'. VisParams: {vis_params_rgb_dict}"
+        
+        # Guardar los vis_params efectivos en caché para que la miniatura los pueda usar
+        GEE_ASSETS_CACHE[f"{output_image_cache_id}_vis"] = vis_params_rgb_dict
+        
+        return f"RGB generado (R:{red_band},G:{green_band},B:{blue_band}) de '{input_collection_cache_id}', guardado como '{output_image_cache_id}'. VisParams efectivos: {vis_params_rgb_dict}"
     except Exception as e: return f"Error al generar RGB: {str(e)}"
 
 def get_and_save_thumbnail(reasoning: str, image_cache_id: str, vis_params: Union[VisParamsBase, dict], dimensions: str, local_filename_prefix: str) -> str:
@@ -290,49 +293,50 @@ def get_and_save_thumbnail(reasoning: str, image_cache_id: str, vis_params: Unio
     if image_cache_id not in GEE_ASSETS_CACHE or not isinstance(GEE_ASSETS_CACHE[image_cache_id], ee.Image):
         return f"Error: Imagen '{image_cache_id}' no encontrada o no es ee.Image."
     
-    image_to_thumb_orig = GEE_ASSETS_CACHE[image_cache_id]
+    image_to_thumb_orig: ee.Image = GEE_ASSETS_CACHE[image_cache_id]
     
-    vis_params_model: VisParamsBase
+    vis_params_model_from_llm: VisParamsBase
     if isinstance(vis_params, dict):
-        try: vis_params_model = VisParamsBase.model_validate(vis_params)
-        except ValidationError as ve: return f"Error al validar vis_params: {ve}."
-    elif isinstance(vis_params, VisParamsBase): vis_params_model = vis_params
+        try: vis_params_model_from_llm = VisParamsBase.model_validate(vis_params)
+        except ValidationError as ve: return f"Error al validar vis_params proporcionados por LLM: {ve}."
+    elif isinstance(vis_params, VisParamsBase): vis_params_model_from_llm = vis_params
     else: return f"Error: Tipo de vis_params inesperado: {type(vis_params)}."
-    
+
+    final_vis_params_model = vis_params_model_from_llm
+    cached_vis_params_dict = GEE_ASSETS_CACHE.get(f"{image_cache_id}_vis")
+    if cached_vis_params_dict:
+        console.log(f"Thumbnail: Encontrados vis_params cacheados para {image_cache_id}. Usándolos para consistencia.")
+        try:
+            final_vis_params_model = VisParamsBase.model_validate(cached_vis_params_dict)
+        except ValidationError as ve:
+            console.print(f"[yellow]Advertencia: No se pudieron validar los vis_params cacheados ({ve}). Se usarán los proporcionados por el LLM.[/yellow]")
+            final_vis_params_model = vis_params_model_from_llm
+            
     try:
         if not os.path.exists(THUMBNAIL_DIR): os.makedirs(THUMBNAIL_DIR)
         
-        vis_params_dict = vis_params_model.model_dump(exclude_none=True) 
+        params_for_thumb_url = final_vis_params_model.model_dump(exclude_none=True)
         
-        image_for_url_generation = image_to_thumb_orig
-        params_for_thumb_url = {'dimensions': dimensions, 'format': 'png'}
+        if 'gamma' in params_for_thumb_url and 'palette' in params_for_thumb_url:
+            del params_for_thumb_url['gamma']
+            console.log("Thumbnail: Eliminado 'gamma' porque 'palette' está presente.")
 
-        is_single_band_index_with_palette = (
-            'palette' in vis_params_dict and
-            image_to_thumb_orig.bandNames().getInfo() == ['nd_index'] and
-            vis_params_dict.get('bands') == ['nd_index']
-        )
+        params_for_thumb_url['dimensions'] = dimensions
+        params_for_thumb_url['format'] = 'png'
 
-        if is_single_band_index_with_palette:
-            console.log(f"Applying .visualize() to '{image_cache_id}' before getThumbURL using palette for single band index.")
-            visualize_args = {
-                'bands': ['nd_index'],
-                'min': vis_params_dict.get('min'),
-                'max': vis_params_dict.get('max'),
-                'palette': vis_params_dict.get('palette')
-            }
-            visualize_args = {k: v for k, v in visualize_args.items() if v is not None}
-            
-            image_for_url_generation = image_to_thumb_orig.visualize(**visualize_args)
-        else:
-            current_thumb_params_to_pass = vis_params_dict.copy()
-            # GEE no permite gamma y palette juntos. Si gamma es None, exclude_none=True ya lo habrá quitado.
-            # Si gamma tiene un valor y hay palette, debemos quitar gamma.
-            if 'palette' in current_thumb_params_to_pass and 'gamma' in current_thumb_params_to_pass:
-                del current_thumb_params_to_pass['gamma']
-            params_for_thumb_url.update(current_thumb_params_to_pass)
+        aoi_for_thumb = GEE_ASSETS_CACHE.get("current_aoi")
+        if not aoi_for_thumb or not isinstance(aoi_for_thumb, ee.Geometry):
+            aoi_for_thumb = image_to_thumb_orig.geometry() 
+        
+        try:
+            region_geojson = ee.Geometry(aoi_for_thumb.bounds(maxError=1)).toGeoJSONString()
+            params_for_thumb_url['region'] = region_geojson
+            console.log(f"Thumbnail: Usando región (bounds del AOI) para getThumbURL.")
+        except Exception as e_region:
+            console.print(f"[yellow]Advertencia: No se pudo obtener/formatear la región para la miniatura: {e_region}. Se intentará sin región explícita.[/yellow]")
 
-        thumb_url = image_for_url_generation.getThumbURL(params_for_thumb_url)
+        console.log(f"Thumbnail: Parámetros finales para getThumbURL: {params_for_thumb_url}")
+        thumb_url = image_to_thumb_orig.getThumbURL(params_for_thumb_url)
         
         response = requests.get(thumb_url)
         response.raise_for_status()
@@ -344,9 +348,19 @@ def get_and_save_thumbnail(reasoning: str, image_cache_id: str, vis_params: Unio
         with open(filepath, 'wb') as f: f.write(response.content)
         
         return f"Miniatura guardada: {filepath}. VisParams (efectivos para getThumbURL): {params_for_thumb_url}"
+    except ee.EEException as eee:
+        error_details = str(eee)
+        if "Parameter 'gamma' is incompatible with 'palette'" in error_details:
+             console.print(f"[bold red]Error GEE thumbnail: {eee}. 'gamma' y 'palette' no pueden usarse juntos en getThumbURL.[/bold red]")
+        elif "Invalid GeoJSON geometry" in error_details or "Unable to parse JSON" in error_details:
+             console.print(f"[bold red]Error GEE thumbnail: {eee}. Problema con el GeoJSON de la región.[/bold red]")
+        else:
+            console.print(f"[bold red]Error GEE thumbnail: {eee}[/bold red]")
+        return f"Error GEE al guardar miniatura para '{image_cache_id}': {str(eee)}."
     except Exception as e:
         console.print(f"[bold red]Detalle error thumbnail: {e}[/bold red]")
         return f"Error al guardar miniatura para '{image_cache_id}': {str(e)}."
+
 
 def export_image_to_drive(reasoning: str, image_cache_id: str, description: str, drive_folder: str, scale: int, crs: Optional[str], vis_params_for_export: Optional[VisParamsBase]) -> str:
     console.log(f"[blue]Tool: export_image_to_drive[/blue] - Desc: {description} - Folder: {drive_folder} - Reasoning: {reasoning}")
@@ -359,6 +373,9 @@ def export_image_to_drive(reasoning: str, image_cache_id: str, description: str,
     if not aoi_for_export or not isinstance(aoi_for_export, ee.Geometry):
         try: aoi_for_export = image_to_export_orig.geometry()
         except Exception as e_geom: return f"Error: No se pudo obtener AOI para exportar '{image_cache_id}': {e_geom}."
+    
+    current_scale = scale 
+
     try:
         image_to_export = image_to_export_orig
         vis_params_export_dict = {}
@@ -372,28 +389,64 @@ def export_image_to_drive(reasoning: str, image_cache_id: str, description: str,
             
             if vis_model:
                 vis_params_export_dict = vis_model.model_dump(exclude_none=True)
-                # Asegurar 'bands' para índices con paleta
                 if 'palette' in vis_params_export_dict and 'bands' not in vis_params_export_dict and image_to_export_orig.bandNames().getInfo() == ['nd_index']:
                     vis_params_export_dict['bands'] = ['nd_index']
-                
-                # GEE no permite gamma y palette juntos. Si gamma es None, exclude_none=True ya lo habrá quitado.
-                # Si gamma tiene un valor y hay palette, debemos quitar gamma antes de .visualize().
                 if 'palette' in vis_params_export_dict and 'gamma' in vis_params_export_dict:
                     del vis_params_export_dict['gamma']
-                
                 image_to_export = image_to_export_orig.visualize(**vis_params_export_dict)
 
-        export_params: Dict[str, Any] = {'image': image_to_export, 'description': description.replace(" ", "_"), 'folder': drive_folder, 'scale': scale, 'region': aoi_for_export.bounds().getInfo()['coordinates'], 'fileFormat': 'GeoTIFF', 'maxPixels': 1e13}
+        export_params: Dict[str, Any] = {'image': image_to_export, 'description': description.replace(" ", "_"), 'folder': drive_folder, 'scale': current_scale, 'region': aoi_for_export.bounds().getInfo()['coordinates'], 'fileFormat': 'GeoTIFF', 'maxPixels': 1e13}
         if crs: export_params['crs'] = crs
+
+        area_calc_scale = max(current_scale, 250) 
+        region_area_m2_obj = ee.Image.pixelArea().reduceRegion(
+                reducer=ee.Reducer.sum(), geometry=aoi_for_export, scale=area_calc_scale, maxPixels=1e13, bestEffort=True
+        )
+        region_area_m2 = region_area_m2_obj.get('area').getInfo()
+        
+        if region_area_m2 is None: 
+            console.print("[yellow]Advertencia: No se pudo calcular el área exacta del AOI para estimar tamaño. Se usará un AOI más pequeño para la estimación.[/yellow]")
+            try:
+                aoi_centroid = aoi_for_export.centroid(maxError=1000).buffer(max(10000, current_scale * 100), maxError=1000) 
+                region_area_m2 = ee.Image.pixelArea().reduceRegion(
+                    reducer=ee.Reducer.sum(), geometry=aoi_centroid, scale=area_calc_scale, maxPixels=1e13, bestEffort=True
+                ).get('area').getInfo() or 0
+            except Exception as area_fallback_e:
+                console.print(f"[red]Error calculando área de fallback: {area_fallback_e}. Se omite control de tamaño.[/red]")
+                region_area_m2 = 0 
+
+        if region_area_m2 > 0 :
+            estimated_pixels = region_area_m2 / (current_scale * current_scale)
+            bytes_per_pixel = 3 
+            if not vis_params_for_export and image_to_export.bandNames().size().getInfo() == 1: 
+                band_type_info = image_to_export.bandTypes().get(image_to_export.bandNames().get(0)).getInfo()
+                band_type = band_type_info.get('precision') if isinstance(band_type_info, dict) else str(band_type_info)
+
+                if 'float' in band_type or 'double' in band_type: bytes_per_pixel = 4 
+                elif 'int32' in band_type or 'int64' in band_type : bytes_per_pixel = 4 
+                elif 'int16' in band_type : bytes_per_pixel = 2
+            
+            estimated_size_mb = (estimated_pixels * bytes_per_pixel) / (1024**2)
+            console.print(f"Exportación: Escala inicial {current_scale}m. Área AOI: {region_area_m2 / 1e6:.2f} km². Tamaño estimado: {estimated_size_mb:.2f} MB.")
+
+            max_size_mb = 50
+            while estimated_size_mb > max_size_mb and current_scale < 2000: 
+                current_scale *= 2     
+                estimated_size_mb /= 4
+                console.print(f"Exportación: Tamaño excede {max_size_mb}MB. Aumentando escala a {current_scale}m. Nuevo tamaño estimado: {estimated_size_mb:.2f} MB.")
+            export_params['scale'] = current_scale
+        
+        # Se eliminó la línea que causaba error: export_params['fileFormatOptions'] = {'cloudOptimized': True, 'tiffCompression': 'LZW'}
+        # GEE usará opciones por defecto para GeoTIFF. Si se requiere COG, se puede añadir 'cloudOptimized': True a formatOptions si es soportado.
+        # Por ahora, se omite para asegurar compatibilidad.
+        
         task = ee.batch.Export.image.toDrive(**export_params); task.start()
-        return f"Exportación a Drive iniciada: '{description}', Tarea ID: {task.id}. VisParams aplicados: {vis_params_export_dict if vis_params_export_dict else 'Ninguno (datos crudos)'}"
+        return f"Exportación a Drive iniciada: '{description}', Tarea ID: {task.id}. Escala final: {export_params['scale']}m. VisParams aplicados: {vis_params_export_dict if vis_params_export_dict else 'Ninguno (datos crudos)'}"
     except Exception as e: return f"Error al exportar a Drive '{image_cache_id}': {str(e)}"
 
 def complete_task(reasoning: str, final_message_to_user: str) -> str:
     """Indica que el agente ha completado la tarea del usuario y proporciona un mensaje final."""
     console.log(f"[blue]Tool: complete_task[/blue] - Reasoning: {reasoning}")
-    # El mensaje final ya lo habrá generado el LLM como parte de los args.
-    # Esta función principalmente señala la finalización.
     return f"Tarea marcada como completada por el LLM. Mensaje para el usuario: {final_message_to_user}"
 
 # ---------------------------------------------------
@@ -402,7 +455,7 @@ def complete_task(reasoning: str, final_message_to_user: str) -> str:
 tools_definitions = [
     InitializeGeeArgs, DefineAoiFromGeoJSONArgs, GetImageCollectionArgs,
     CalculateNdIndexArgs, GenerateRgbCompositeArgs, GetAndSaveThumbnailArgs,
-    ExportImageToDriveArgs, CompleteTaskArgs # CompleteTaskArgs añadida
+    ExportImageToDriveArgs, CompleteTaskArgs
 ]
 tools = [pydantic_function_tool(tool_def) for tool_def in tools_definitions]
 
@@ -421,10 +474,11 @@ AGENT_PROMPT = """<purpose>
     <instruction>Para miniaturas, usa `GetAndSaveThumbnailArgs`. Especifica `image_cache_id` y `vis_params`. Para índices de una sola banda (como NDVI o NDBI, que se guardan con el nombre de banda 'nd_index'), usa `vis_params` como `{"min": -0.3, "max": 0.5, "palette": ["0000FF", "FFFFFF", "A52A2A"], "bands": ["nd_index"]}`.  
     Si se usa una paleta, `gamma` debe ser `null` o no incluirse.  
     Para RGB, usa algo como `{"min": 0, "max": 3000, "gamma": 1.4, "bands": ["B4","B3","B2"]}` (asegúrate de que las bandas RGB coincidan con las usadas en `GenerateRgbCompositeArgs`). Guarda en '{THUMBNAIL_DIR}'. El `local_filename_prefix` debe ser solo un nombre de archivo, sin ruta de directorio.</instruction>
-    <instruction>Para exportar a Drive, usa `ExportImageToDriveArgs`. `description` es el nombre de archivo. `drive_folder` (defecto: '{DEFAULT_DRIVE_FOLDER}'). `scale` en metros (para Sentinel-2 usa 10 m; para Landsat usa 30 m).
+    <instruction>Para exportar a Drive, usa `ExportImageToDriveArgs`. `description` es el nombre de archivo. `drive_folder` (defecto: '{DEFAULT_DRIVE_FOLDER}'). `scale` en metros (para Sentinel-2 usa 10 m o 20m; para Landsat usa 30 m).
         Si el objetivo es una imagen visual coloreada para el índice (similar a la miniatura), DEBES proporcionar `vis_params_for_export` con la paleta y banda adecuadas (ej. NDVI: `{"min": -0.3, "max": 0.5, "palette": ["0000FF", "FFFFFF", "A52A2A"], "bands": ["nd_index"]}`). Si se usa una paleta, `gamma` debe ser `null` o no incluirse.
         Si explícitamente se piden datos crudos del índice (para análisis numérico, lo que resultará en una imagen en escala de grises por defecto), omite `vis_params_for_export`.
-        Para exportar una imagen RGB visual, usa también `vis_params_for_export` (ej. `{"min": 0, "max": 3000, "gamma": 1.4, "bands": ["B4","B3","B2"]}`).</instruction>
+        Para exportar una imagen RGB visual, usa también `vis_params_for_export` (ej. `{"min": 0, "max": 3000, "gamma": 1.4, "bands": ["B4","B3","B2"]}`).
+        Si el área solicitada es grande (ej. una región entera o una ciudad muy grande), considera ajustar la resolución (`scale` ≥ 20 m o incluso más) para que el archivo final no supere aproximadamente 50 MB. Este agente se usa para informes visuales, no para cartografía de precisión que requiera resoluciones máximas siempre.</instruction>
     <instruction>Proporciona razonamiento conciso para cada llamada. Usa IDs de caché para referenciar objetos.</instruction>
     <instruction>Una vez que todas las acciones solicitadas (ej. cálculo de índice, miniatura, exportación) se hayan completado exitosamente, llama a la herramienta `CompleteTaskArgs` para finalizar la interacción, proporcionando un `final_message_to_user` que resuma lo que se hizo y dónde encontrar los resultados.</instruction>
 </instructions>
@@ -490,7 +544,7 @@ def main():
             message_obj = response.choices[0].message 
 
             if message_obj.tool_calls:
-                messages.append(message_obj.model_dump()) # Guardar solicitud de herramienta como dict
+                messages.append(message_obj.model_dump()) 
                 
                 task_completed_by_tool_call = False
                 for tool_call in message_obj.tool_calls:
@@ -506,23 +560,10 @@ def main():
                             if func_name == "ExportImageToDriveArgs" and 'drive_folder' not in parsed_args_dict:
                                 parsed_args_dict['drive_folder'] = args.drive_folder
                             
-                            # Para GenerateRgbCompositeArgs, GetAndSaveThumbnailArgs y ExportImageToDriveArgs,
-                            # los vis_params pueden venir como dict y necesitan ser pasados como tal
-                            # si la función los espera así para validación interna de VisParamsBase.
-                            if func_name in ["GenerateRgbCompositeArgs", "GetAndSaveThumbnailArgs", "ExportImageToDriveArgs"]:
-                                # La validación principal de los args de la herramienta se hace con pydantic_class.model_validate.
-                                # El campo vis_params (o vis_params_rgb, vis_params_for_export) dentro de esos args
-                                # será validado como VisParamsBase por Pydantic.
-                                # La función herramienta recibirá el objeto Pydantic y lo usará.
-                                parsed_args_obj = pydantic_class.model_validate(parsed_args_dict)
-                                tool_result = function_to_call(**parsed_args_obj.model_dump())
-                            else:
-                                parsed_args = pydantic_class.model_validate(parsed_args_dict)
-                                tool_result = function_to_call(**parsed_args.model_dump())
-
+                            parsed_args_obj = pydantic_class.model_validate(parsed_args_dict)
+                            tool_result = function_to_call(**parsed_args_obj.model_dump())
 
                             if func_name == "CompleteTaskArgs":
-                                # El mensaje final ya está en parsed_args.final_message_to_user
                                 final_user_message = json.loads(func_args_str).get("final_message_to_user", "Tarea completada.")
                                 console.print(Panel(f"[magenta]Respuesta Final (vía CompleteTaskArgs):[/magenta]\n{final_user_message}", title="LLM -> User (Task Completed)"))
                                 console.print("[bold green]Agente finalizado por CompleteTaskArgs.[/bold green]")

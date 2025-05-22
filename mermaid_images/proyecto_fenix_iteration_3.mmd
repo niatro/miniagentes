@@ -1,0 +1,31 @@
+graph TD
+    classDef tema fill:#f9f9f9,stroke:#333,stroke-width:2px,font-size:16px
+    classDef accion fill:#e1f5fe,stroke:#0288d1,stroke-width:2px,font-size:14px
+    classDef decision fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,font-size:14px
+
+    A[Proyecto Fénix: Rediseño de e-commerce] -->|"requiere"| B[Adoptar Arquitectura de Microservicios]
+    B -->|"genera"| C[Definir API Gateway]
+
+    C -->|"requiere"| D[Desarrollar Microservicio de Usuarios]
+    C -->|"inicia en paralelo"| E[Diseñar Nueva Interfaz de Usuario]
+
+    B -->|"implica"| F[Investigar Soluciones de Búsqueda Semántica]
+    F -->|"genera"| G[Evaluar Dos Proveedores de Búsqueda]
+    G -->|"contribuye a"| H[Seleccionar Tecnología para Microservicio de Catálogo]
+
+    A -->|"implementa"| I[Establecer Sprints Quincenales]
+
+    %% Espaciado adicional para mejorar la claridad visual
+    style A stroke-width:3px
+    style B stroke-width:3px
+    style C stroke-width:3px
+    style D stroke-width:3px
+    style E stroke-width:3px
+    style F stroke-width:3px
+    style G stroke-width:3px
+    style H stroke-width:3px
+    style I stroke-width:3px
+
+    class A tema
+    class C,E,H,I accion
+    class B,D,F decision

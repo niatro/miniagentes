@@ -1,0 +1,24 @@
+graph TD
+    classDef tema fill:#f9f9f9,stroke:#333,stroke-width:2px
+    classDef accion fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
+    classDef decision fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
+
+    A[Proyecto Fénix: Rediseño E-commerce] -->|Adopta| B[Arquitectura de Microservicios]
+    B -->|Inicia| C[Definición del API Gateway]
+    
+    C -->|Requiere| D[Aprobación del Equipo de Arquitectura]
+    D -->|Permite| E[Desarrollo del Microservicio de Usuarios]
+    E -->|Depende de| C
+    
+    B -->|Explora| F[Investigación de Soluciones de Búsqueda Semántica]
+    F -->|Genera| G[Evaluación de Proveedores de Búsqueda]
+    G -->|Contribuye a| H[Selección de Tecnología para Microservicio de Catálogo]
+    
+    A -->|Complementa| I[Diseño de Nueva Interfaz de Usuario]
+    I -->|Inicia en Paralelo| C
+    
+    A -->|Implementa| J[Establecimiento de Sprints Quincenales]
+
+    class A tema
+    class C,E,G,I,J accion
+    class B,D,F,H decision
