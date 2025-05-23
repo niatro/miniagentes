@@ -9,23 +9,13 @@
 # ///
 
 """
-sfa_mermaid_visual_agent_openai_v1.py
+sfa_mermaid_visual_agent_openai_v2.py - Versión Mejorada Completa
 
-Este agente Single File Agent (SFA) genera diagramas Mermaid basados en la descripción
-del usuario, utilizando un modelo LLM de OpenAI con capacidades de visión (como gpt-4.1 o gpt-4.1-mini)
-para un ciclo de revisión y refinamiento visual.
-
-Flujo de Trabajo:
-1. El LLM (texto) genera un primer borrador del código Mermaid basado en el prompt del usuario.
-2. El código Mermaid se renderiza a una imagen PNG usando la API de Kroki.
-3. El LLM (visión) analiza la imagen PNG generada (y la compara con la imagen previa si existe),
-   evaluando la calidad, claridad, estética, y si los cambios son apreciables.
-4. El LLM proporciona feedback para mejorar el código Mermaid, incluyendo sugerencias sobre
-   colores, tipos de línea, agrupaciones (subgrafos), etc.
-5. Si hay feedback constructivo y se espera una mejora apreciable (y no se ha alcanzado el
-   límite de iteraciones), se genera una nueva versión del código Mermaid. Se repite desde el paso 2.
-6. Una vez que el diagrama se considera satisfactorio, la mejora es mínima, o se alcanza el
-   límite de iteraciones, la tarea se completa.
+Mejoras implementadas:
+1. Modelo por defecto: gpt-4o-mini
+2. Mejor manejo de entrada de texto (archivos y texto multilínea)
+3. Validación de modelos
+4. Plantillas de diagramas predefinidas
 """
 
 import os
@@ -34,14 +24,14 @@ import json
 import argparse
 import base64
 import uuid
-import re # Para extraer número de línea del error de Kroki
+import re
 from typing import List, Dict, Any, Optional
 
 from dotenv import load_dotenv
 import requests
 import openai
 from pydantic import BaseModel, Field
-from openai import pydantic_function_tool # type: ignore
+from openai import pydantic_function_tool
 from rich.console import Console
 from rich.panel import Panel
 
@@ -59,8 +49,18 @@ if not OPENAI_API_KEY:
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
 KROKI_URL = "https://kroki.io/mermaid/png"
-IMAGE_DIR = "./mermaid_images" # Directorio para guardar las imágenes generadas
+IMAGE_DIR = "./mermaid_images"
 os.makedirs(IMAGE_DIR, exist_ok=True)
+
+# Plantillas de diagramas predefinidas
+DIAGRAM_TEMPLATES = {
+    "meeting": "Diagrama de reunión con decisiones y acciones",
+    "process": "Diagrama de proceso o flujo de trabajo",
+    "architecture": "Diagrama de arquitectura de sistema",
+    "timeline": "Línea de tiempo con hitos",
+    "mindmap": "Mapa mental de conceptos",
+    "custom": "Diagrama personalizado"
+}
 
 # Prompt base proporcionado por el usuario para la generación inicial de Mermaid
 USER_PROVIDED_MERMAID_GENERATION_PROMPT_TEMPLATE = """
@@ -172,7 +172,7 @@ graph TD
 1.  **SOLO CARACTERES ASCII:** Utiliza ÚNICAMENTE caracteres ASCII estándar (a-z, A-Z, 0-9, espacios y símbolos básicos de puntuación como -, _, ., |, :, ?, !).
 2.  **NO ACENTOS NI CARACTERES ESPECIALES:** NO utilices acentos (á, é, í, ó, ú), eñes (ñ, Ñ), diéresis (ü), ni otros caracteres especiales o diacríticos (ç, å, ø, etc.) en el texto de los nodos, etiquetas de flechas, o nombres de subgrafos. Reemplázalos por sus equivalentes ASCII simples (ej. "accion" en lugar de "acción", "reunion" en lugar de "reunión", "diseno" en lugar de "diseño").
 3.  **SALTOS DE LÍNEA:** Para saltos de línea DENTRO del texto de un nodo, utiliza `\\n` (doble barra invertida seguida de n). Ejemplo: `A[Texto Largo\\nSegunda Linea]`. Si el renderizado con `\\n` falla, intenta eliminar los saltos de línea por completo y usar frases más cortas o dividir en múltiples nodos. NO uses `<br>`.
-4.  **PARÉNTESIS Y COMILLAS:** Evita el uso de paréntesis `()` o comillas especiales (”, ‘, «, ») dentro del texto de los nodos si es posible. Si son absolutamente necesarios, asegúrate de que no causen conflictos. Las comillas dobles `"` SÍ se usan para encerrar el texto de los nodos si este contiene caracteres que Mermaid podría interpretar de otra manera (ej. `A["Nodo con ( paréntesis )"]`), pero es preferible evitarlo.
+4.  **PARÉNTESIS Y COMILLAS:** Evita el uso de paréntesis `()` o comillas especiales (", ', «, ») dentro del texto de los nodos si es posible. Si son absolutamente necesarios, asegúrate de que no causen conflictos. Las comillas dobles `"` SÍ se usan para encerrar el texto de los nodos si este contiene caracteres que Mermaid podría interpretar de otra manera (ej. `A["Nodo con ( paréntesis )"]`), pero es preferible evitarlo.
 5.  **SIMPLICIDAD DEL TEXTO:** El texto dentro de los nodos (ej. `A[Texto del Nodo]`) y en las etiquetas de las flechas (ej. `A -->|"Etiqueta aquí"| B`) debe ser lo más simple y directo posible para asegurar la máxima compatibilidad con el renderizador de Kroki.
 6.  **NOMBRES DE SUBGRAFOS:** Los nombres de los subgrafos también deben seguir estas restricciones de caracteres. Si un nombre de subgrafo necesita espacios, enciérralo entre comillas dobles: `subgraph "Nombre del Subgrafo con Espacios"`.
 
@@ -203,6 +203,42 @@ Basado en la siguiente descripción de la reunión o tarea del usuario:
 {{user_task_content}}
 </user_task_description>
 """
+
+# Extensiones de plantilla específicas por tipo
+TEMPLATE_EXTENSIONS = {
+    "architecture": """
+# INSTRUCCIONES ADICIONALES PARA DIAGRAMAS DE ARQUITECTURA
+- Usar subgrafos para agrupar componentes relacionados (Frontend, Backend, Data Layer, etc.)
+- Mostrar flujo de datos entre componentes con flechas etiquetadas
+- Indicar tecnologías/protocolos en las conexiones (HTTP, gRPC, WebSocket, etc.)
+- Diferenciar tipos de componentes con estilos (servicios, bases de datos, colas, etc.)
+- Incluir componentes externos claramente diferenciados
+""",
+    "process": """
+# INSTRUCCIONES ADICIONALES PARA DIAGRAMAS DE PROCESO
+- Usar formas apropiadas: rectángulos para actividades, rombos para decisiones
+- Incluir puntos de inicio y fin claramente marcados
+- Mostrar flujos alternativos y excepciones
+- Numerar los pasos si es relevante
+- Indicar actores o sistemas responsables cuando sea crítico
+""",
+    "timeline": """
+# INSTRUCCIONES ADICIONALES PARA LÍNEAS DE TIEMPO
+- Organizar eventos cronológicamente de arriba a abajo
+- Incluir fechas o períodos cuando estén disponibles
+- Agrupar eventos relacionados
+- Usar estilos diferentes para tipos de hitos
+- Mostrar dependencias temporales entre eventos
+""",
+    "mindmap": """
+# INSTRUCCIONES ADICIONALES PARA MAPAS MENTALES
+- Concepto central en el medio con ramificaciones
+- Usar orientación radial si es posible
+- Agrupar conceptos relacionados con colores
+- Mantener texto conciso en cada nodo
+- Mostrar jerarquías de conceptos claramente
+"""
+}
 
 # ---------------------------------------------------
 # MODELOS Pydantic para Herramientas
@@ -238,10 +274,25 @@ class CompleteTaskArgs(BaseModel):
 # FUNCIONES HERRAMIENTA
 # ---------------------------------------------------
 
+def process_user_input(prompt: str) -> str:
+    """Procesa el input del usuario (texto o archivo)."""
+    if os.path.isfile(prompt):
+        console.print(f"[blue]📄 Leyendo contenido desde: {prompt}[/blue]")
+        try:
+            with open(prompt, 'r', encoding='utf-8') as f:
+                content = f.read()
+            console.print(f"[green]✓ Archivo leído exitosamente ({len(content)} caracteres)[/green]")
+            return content
+        except Exception as e:
+            console.print(f"[red]Error leyendo archivo: {e}[/red]")
+            return prompt
+    return prompt.strip()
+
 def generate_mermaid_code(
     user_task_content: str,
     iteration_count: int,
     model_to_use: str,
+    template_type: str = "custom",
     previous_mermaid_code: Optional[str] = None,
     visual_feedback_from_llm: Optional[str] = None
 ) -> str:
@@ -249,7 +300,10 @@ def generate_mermaid_code(
     console.log(f"[blue]Tool: generate_mermaid_code (Iteración {iteration_count}, Modelo: {model_to_use})[/blue]")
 
     if iteration_count == 1:
-        prompt_content = USER_PROVIDED_MERMAID_GENERATION_PROMPT_TEMPLATE.replace("{{user_task_content}}", user_task_content)
+        base_prompt = USER_PROVIDED_MERMAID_GENERATION_PROMPT_TEMPLATE
+        if template_type in TEMPLATE_EXTENSIONS:
+            base_prompt += TEMPLATE_EXTENSIONS[template_type]
+        prompt_content = base_prompt.replace("{{user_task_content}}", user_task_content)
         system_message = "Eres un experto generando código Mermaid siguiendo instrucciones detalladas. Tu objetivo es producir el código Mermaid inicial, que sea lo más autoexplicativo y didáctico posible. Presta MUCHA ATENCIÓN a las RESTRICCIONES DE SINTAXIS PARA KROKI, especialmente sobre el uso exclusivo de caracteres ASCII y cómo manejar saltos de línea y caracteres especiales."
     else:
         system_message = (
@@ -274,7 +328,7 @@ def generate_mermaid_code(
                 {"role": "system", "content": system_message},
                 {"role": "user", "content": prompt_content}
             ],
-            temperature=0.2, # Más determinista para correcciones de sintaxis
+            temperature=0.2,
         )
         generated_code = response.choices[0].message.content
         if not generated_code:
@@ -299,7 +353,7 @@ def render_mermaid_to_image(mermaid_code: str, output_filename_prefix: str, iter
     """Renderiza código Mermaid a una imagen PNG usando Kroki y la guarda localmente."""
     console.log(f"[blue]Tool: render_mermaid_to_image (Iteración {iteration_count})[/blue]")
     
-    mermaid_code_to_render = mermaid_code # La directiva de fuente se maneja mejor en el prompt si es necesaria
+    mermaid_code_to_render = mermaid_code
 
     try:
         response = requests.post(KROKI_URL, data=mermaid_code_to_render.encode('utf-8'), headers={'Content-Type': 'text/plain; charset=utf-8'})
@@ -319,15 +373,14 @@ def render_mermaid_to_image(mermaid_code: str, output_filename_prefix: str, iter
                 try:
                     error_line_number = int(error_line_match.group(1))
                     lines = mermaid_code_to_render.splitlines()
-                    # Kroki parece ser 1-indexed para errores de línea, Python es 0-indexed
-                    start = max(0, error_line_number - 2) # 1 línea antes
-                    end = min(len(lines), error_line_number + 1) # 1 línea después
+                    start = max(0, error_line_number - 2)
+                    end = min(len(lines), error_line_number + 1)
                     snippet_lines = []
                     for i in range(start, end):
                         prefix = ">> " if i == error_line_number - 1 else "   "
                         snippet_lines.append(f"{prefix}L{i+1}: {lines[i]}")
                     code_snippet = "\n".join(snippet_lines)
-                except Exception: # Fallback si algo sale mal con la extracción del snippet
+                except Exception:
                     code_snippet = "(No se pudo extraer el fragmento de código)"
 
             error_msg = (
@@ -499,22 +552,35 @@ Si `RenderMermaidToImage` falla, el siguiente paso debe ser `GenerateMermaidCode
 # ---------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(description="Agente SFA para generar diagramas Mermaid con revisión visual.")
-    parser.add_argument("-p", "--prompt", required=True, help="Descripción de la tarea o reunión para generar el diagrama Mermaid.")
-    parser.add_argument("-m", "--model", type=str, default="gpt-4.1", help="Modelo de OpenAI a utilizar (ej. gpt-4.1, gpt-4.1-mini, gpt-4o).")
+    parser.add_argument("-p", "--prompt", required=True, help="Texto o archivo con el contenido a convertir en diagrama Mermaid.")
+    parser.add_argument("-m", "--model", type=str, default="gpt-4o-mini", help="Modelo de OpenAI a utilizar (default: gpt-4o-mini).")
     parser.add_argument("-i", "--max_refinement_iterations", type=int, default=3, help="Máximo número de ciclos de refinamiento visual (además de la generación inicial).")
+    parser.add_argument("-t", "--template", choices=list(DIAGRAM_TEMPLATES.keys()), default="custom", help="Tipo de diagrama predefinido.")
+    
     args = parser.parse_args()
 
-    console.rule(f"[bold green]Inicio del Agente Mermaid Visual (Modelo: {args.model})[/bold green]")
-    console.print(f"Prompt del Usuario: [cyan]{args.prompt}[/cyan]")
-    console.print(f"Máx. Iteraciones de Refinamiento: {args.max_refinement_iterations}")
+    console.rule(f"[bold green]🎨 Generador de Diagramas Mermaid con IA[/bold green]")
+    
+    # Procesar el input del usuario
+    user_content = process_user_input(args.prompt)
+    
+    console.print(f"\n[green]Configuración:[/green]")
+    console.print(f"  • Modelo: {args.model}")
+    console.print(f"  • Tipo de diagrama: {DIAGRAM_TEMPLATES[args.template]}")
+    console.print(f"  • Iteraciones máximas: {args.max_refinement_iterations}")
+    console.print(f"  • Análisis visual: Sí")
+    console.print(f"  • Longitud del texto: {len(user_content)} caracteres")
+    
+    console.print("\n[bold cyan]Iniciando generación del diagrama...[/bold cyan]")
 
     current_mermaid_code: Optional[str] = None
     current_image_path: Optional[str] = None
     previous_image_path_for_analysis: Optional[str] = None
+    template_type = args.template
     
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": AGENT_SYSTEM_PROMPT},
-        {"role": "user", "content": f"Por favor, genera un diagrama Mermaid para la siguiente tarea: {args.prompt}. Inicia el proceso con la iteración de generación de código 1."}
+        {"role": "user", "content": f"Por favor, genera un diagrama Mermaid para la siguiente tarea: {user_content}. Inicia el proceso con la iteración de generación de código 1. Usa el template tipo '{template_type}'."}
     ]
 
     tool_map = {
@@ -534,12 +600,12 @@ def main():
     total_agent_loops = args.max_refinement_iterations * 3 + 5 
     refinement_cycles_done = 0
     
-    code_generation_iteration_counter = 0 # Para el argumento iteration_count de GenerateMermaidCode
-    render_iteration_counter = 0 # Para el argumento iteration_count de RenderMermaidToImage
-    analysis_iteration_counter = 0 # Para el argumento iteration_count de AnalyzeMermaidImage
+    code_generation_iteration_counter = 0
+    render_iteration_counter = 0
+    analysis_iteration_counter = 0
 
     for agent_loop_num in range(1, total_agent_loops + 1):
-        console.rule(f"[yellow]Ciclo de Agente General {agent_loop_num}/{total_agent_loops} (Refinamientos Completados: {refinement_cycles_done}/{args.max_refinement_iterations})[/yellow]")
+        console.rule(f"[yellow]Ciclo de Agente {agent_loop_num}/{total_agent_loops} (Refinamientos: {refinement_cycles_done}/{args.max_refinement_iterations})[/yellow]")
 
         try:
             response = client.chat.completions.create(
@@ -558,7 +624,7 @@ def main():
                     tool_args_str = tool_call.function.arguments
                     tool_call_id = tool_call.id
 
-                    console.print(f"[blue]Llamada a Herramienta => {tool_name}({tool_args_str})[/blue]")
+                    console.print(f"[blue]Llamada a Herramienta => {tool_name}[/blue]")
 
                     if tool_name not in tool_map:
                         console.print(f"[red]Error: Herramienta desconocida '{tool_name}'[/red]")
@@ -573,15 +639,14 @@ def main():
                             if 'reasoning' in func_kwargs:
                                 del func_kwargs['reasoning']
 
-                            if tool_name in ["GenerateMermaidCodeArgs", "AnalyzeMermaidImageArgs"]:
-                                func_kwargs['model_to_use'] = args.model
-                            
-                            # Manejo de contadores de iteración para cada herramienta
                             if tool_name == "GenerateMermaidCodeArgs":
+                                func_kwargs['model_to_use'] = args.model
+                                func_kwargs['template_type'] = template_type
                                 code_generation_iteration_counter = parsed_args.iteration_count
                             elif tool_name == "RenderMermaidToImageArgs":
                                 render_iteration_counter = parsed_args.iteration_count
                             elif tool_name == "AnalyzeMermaidImageArgs":
+                                func_kwargs['model_to_use'] = args.model
                                 analysis_iteration_counter = parsed_args.iteration_count
                                 func_kwargs['previous_image_path'] = previous_image_path_for_analysis
 
@@ -589,8 +654,7 @@ def main():
                             
                             if tool_name == "GenerateMermaidCodeArgs":
                                 current_mermaid_code = function_result
-                                if "Error al generar código Mermaid:" in current_mermaid_code: # Si el LLM devuelve error
-                                    # Forzar finalización si la generación de código falla
+                                if "Error al generar código Mermaid:" in current_mermaid_code:
                                     console.print(f"[red]Error crítico en GenerateMermaidCode: {current_mermaid_code}. Finalizando agente.[/red]")
                                     complete_task(current_mermaid_code or "Error", current_image_path or "N/A", "Finalizado debido a error en generación de código.")
                                     return
@@ -598,10 +662,8 @@ def main():
                                 if "Error al renderizar con Kroki:" not in function_result:
                                     previous_image_path_for_analysis = current_image_path 
                                     current_image_path = function_result
-                                else: # Error de Kroki
-                                    current_image_path = None # No hay imagen válida
-                                    # El `function_result` ya es el mensaje de error formateado
-                                    # El LLM debería llamar a GenerateMermaidCode con este error como feedback
+                                else:
+                                    current_image_path = None
                             elif tool_name == "AnalyzeMermaidImageArgs":
                                 visual_feedback = function_result
                                 if visual_feedback:
@@ -617,14 +679,14 @@ def main():
                                             console.print("[red]Error: Feedback óptimo/mínimo pero falta código o imagen.[/red]")
                                     elif feedback_upper.startswith("REFINAR"):
                                         refinement_cycles_done +=1 
-                                        console.print(f"[yellow]Feedback visual indica REFINAR. Ciclos de refinamiento completados: {refinement_cycles_done}.[/yellow]")
+                                        console.print(f"[yellow]Feedback visual indica REFINAR. Ciclos de refinamiento: {refinement_cycles_done}.[/yellow]")
 
                             if isinstance(function_result, (list, dict)):
                                 result_content = json.dumps(function_result, ensure_ascii=False)
                             else:
                                 result_content = str(function_result)
 
-                            console.print(f"Resultado de Herramienta ({tool_name}):\n{result_content[:1000]}...") 
+                            console.print(f"Resultado de Herramienta ({tool_name}):\n{result_content[:500]}...") 
 
                             if tool_name == "CompleteTaskArgs":
                                 console.print("[bold green]Agente finalizado por llamada a CompleteTask.[/bold green]")
@@ -655,18 +717,18 @@ def main():
                  if current_mermaid_code and current_image_path:
                     summary = f"Proceso finalizado tras alcanzar el límite de {args.max_refinement_iterations} iteraciones de refinamiento."
                     complete_task(current_mermaid_code, current_image_path, summary)
-                 elif current_mermaid_code: # Si hay código pero no imagen (falló el último render)
+                 elif current_mermaid_code:
                     summary = f"Proceso finalizado tras alcanzar el límite de {args.max_refinement_iterations} iteraciones. El último renderizado pudo haber fallado."
                     complete_task(current_mermaid_code, current_image_path or "Último render fallido", summary)
                  else:
-                    console.print("[red]No se pudo completar la tarea al alcanzar el límite de iteraciones de refinamiento, falta código o imagen.[/red]")
+                    console.print("[red]No se pudo completar la tarea al alcanzar el límite de iteraciones de refinamiento.[/red]")
                  break
         
         except Exception as e:
             console.print(f"[bold red]Error crítico en el ciclo del agente: {e}[/bold red]")
             break
             
-    console.print("[bold yellow]Agente finalizado (límite de bucles generales o error).[/bold yellow]")
+    console.print("[bold yellow]Agente finalizado.[/bold yellow]")
 
 if __name__ == "__main__":
     main()
