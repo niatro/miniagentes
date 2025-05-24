@@ -1,0 +1,24 @@
+graph TD;
+  subgraph Propuesta_Innovacion
+    A["Análisis IA"] --> B[/Deep Learning/]
+    B --> C[/Imágenes Médicas/]
+  end
+  subgraph Feasibility_Tecnica
+    D[/Modelos Pre-entrenados/] -.-> E["Ajuste Fino"]
+  end
+  subgraph Business_Case
+    F["Reducir Tiempo"] ==> G["Mejorar Precisión"]
+  end
+  subgraph Implementacion
+    H[/3 Data Scientists/] --> I[/2 Ingenieros Backend/]
+  end
+  subgraph Timeline
+    J["6 Meses MVP"]
+  end
+  subgraph Riesgos
+    K{Regulación FDA} -.-> L{Aceptación Médicos}
+  end
+  A ==> D
+  F ==> J
+  J ..-> K
+  K ..-> L

@@ -553,7 +553,7 @@ Si `RenderMermaidToImage` falla, el siguiente paso debe ser `GenerateMermaidCode
 def main():
     parser = argparse.ArgumentParser(description="Agente SFA para generar diagramas Mermaid con revisión visual.")
     parser.add_argument("-p", "--prompt", required=True, help="Texto o archivo con el contenido a convertir en diagrama Mermaid.")
-    parser.add_argument("-m", "--model", type=str, default="gpt-4o-mini", help="Modelo de OpenAI a utilizar (default: gpt-4o-mini).")
+    parser.add_argument("-m", "--model", type=str, default="gpt-4o", help="Modelo de OpenAI a utilizar (default: gpt-4o).")
     parser.add_argument("-i", "--max_refinement_iterations", type=int, default=3, help="Máximo número de ciclos de refinamiento visual (además de la generación inicial).")
     parser.add_argument("-t", "--template", choices=list(DIAGRAM_TEMPLATES.keys()), default="custom", help="Tipo de diagrama predefinido.")
     

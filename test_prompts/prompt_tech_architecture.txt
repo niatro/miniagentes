@@ -1,0 +1,12 @@
+Descripción del sistema de gestión de pedidos:
+1. Interfaz de Usuario (React) permite a los clientes crear y ver pedidos.
+2. API Gateway (Kong) enruta las solicitudes a los microservicios apropiados.
+3. Servicio de Pedidos (Java Spring Boot) maneja la lógica de negocio de los pedidos.
+4. Servicio de Usuarios (Python FastAPI) gestiona la autenticación y perfiles de usuario.
+5. Base de Datos de Pedidos (PostgreSQL) almacena la información de los pedidos.
+6. Base de Datos de Usuarios (MongoDB) almacena los datos de los usuarios.
+7. Bus de Mensajes (Kafka) para comunicación asíncrona entre servicios (ej. notificación de pedido).
+8. Servicio de Notificaciones (Node.js) consume eventos de Kafka y envía emails/SMS.
+Consideraciones: Escalabilidad, Seguridad en API Gateway, Consistencia de datos entre BBDD.
+Puntos de validación: Pruebas de carga en Servicio de Pedidos, Auditoría de seguridad en Servicio de Usuarios.
+Métricas: Tiempo de respuesta <200ms, 99.9% Uptime.

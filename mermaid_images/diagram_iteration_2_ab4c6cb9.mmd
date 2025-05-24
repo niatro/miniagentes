@@ -1,0 +1,41 @@
+graph TD
+    classDef tema fill:#ffeb3b,stroke:#333,stroke-width:2px
+    classDef accion fill:#bbdefb,stroke:#0288d1,stroke-width:2px
+    classDef decision fill:#d1c4e9,stroke:#7b1fa2,stroke-width:2px
+    classDef riesgo fill:#ffcdd2,stroke:#d32f2f,stroke-width:2px
+
+    A[Propuesta de Innovación: Plataforma de IA] -->|"resulta en"| B[Análisis de Imágenes Médicas]
+    B -->|"requiere"| C[Modelos Pre-entrenados]
+    C -->|"genera"| D[Ajuste Fino de Modelos]
+
+    subgraph Caso_de_Negocio
+        direction TB
+        E[Reducir Tiempo de Diagnóstico]
+        F[Mejorar Precisión]
+    end
+    D -->|"conduce a"| E
+    D -->|"conduce a"| F
+
+    subgraph Implementación
+        direction TB
+        G[Equipo de 3 Data Scientists]
+        H[2 Ingenieros Backend]
+        I[MVP en 6 Meses]
+    end
+    D -->|"requiere"| G
+    D -->|"requiere"| H
+    G --> I
+    H --> I
+
+    subgraph Riesgos
+        direction TB
+        J[Regulación FDA]
+        K[Aceptación por Médicos]
+    end
+    I -.->|"influye en"| J
+    I -.->|"influye en"| K
+
+    class A tema
+    class B,C,D,G,H,I accion
+    class E,F decision
+    class J,K riesgo

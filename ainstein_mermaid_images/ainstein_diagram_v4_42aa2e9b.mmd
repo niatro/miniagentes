@@ -1,0 +1,19 @@
+graph TD
+    subgraph Proceso_Analisis_IA
+        A[Proceso] --> B[Proceso] --> C[/Recurso Input/]
+        C -.-> D[Proceso]
+    end
+    subgraph Equipo_Implementacion
+        G["Data Scientists"]
+        H["Ingenieros Backend"]
+    end
+    subgraph Resultados_Esperados
+        D ==> E>Resultado]
+        D ==> F>Resultado]
+    end
+    I["6 meses MVP"]
+    subgraph Riesgos
+        J{Decision}
+        J ..-> K[[Validacion]]
+        J ..-> L[[Validacion]]
+    end

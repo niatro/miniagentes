@@ -1,0 +1,11 @@
+Análisis del ciclo de vida de un producto electrónico:
+Fases:
+1. Extracción de Materias Primas: Minería de metales (cobre, oro), extracción de plásticos. Impacto: Agotamiento de recursos, contaminación del suelo.
+2. Manufactura de Componentes: Fabricación de PCBs, chips, carcasas. Impacto: Alto consumo energético, emisiones de GEI, uso de químicos peligrosos.
+3. Ensamblaje del Producto: Unión de componentes. Impacto: Consumo energético, generación de residuos.
+4. Distribución: Transporte a minoristas y clientes. Impacto: Emisiones de GEI por transporte.
+5. Uso por el Consumidor: Consumo eléctrico durante la vida útil. Impacto: Consumo energético.
+6. Fin de Vida: Desecho o reciclaje. Impacto: Residuos electrónicos (e-waste), potencial de recuperación de materiales o contaminación si no se gestiona bien.
+Métricas clave: Huella de carbono (kg CO2eq), consumo de agua (m3), generación de residuos (kg).
+Objetivo: Identificar puntos críticos para reducir el impacto ambiental y proponer mejoras.
+Contingencias: Variabilidad en precios de materias primas, cambios regulatorios en gestión de e-waste.
